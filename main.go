@@ -7,7 +7,8 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
-	"reflect"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/olekukonko/tablewriter"
@@ -23,26 +24,21 @@ type WorkspaceResponse struct {
 	Data []Workspace `json:"data"`
 }
 
+type Metadata struct {
+	Counts map[string]int `json:"counts"`
+	// Add more fields as needed
+}
+
 type WorkspaceMetadata struct {
 	WorkspaceName string
 	Meta          Metadata
 }
 
-type Metadata struct {
-	Counts struct {
-		Plugins   int `json:"plugins"`
-		Targets   int `json:"targets"`
-		Services  int `json:"services"`
-		Routes    int `json:"routes"`
-		Upstreams int `json:"upstreams"`
-	} `json:"counts"`
-	// Add more fields as needed
-}
-
 func main() {
 	// Parse command-line flags
 	urlPtr := flag.String("kong-addr", "", "workspace URL (e.g. http://localhost:8001)")
-	headersPtr := flag.String("headers", "", "headers for the request (e.g. 'x-admin-token:token_value')")
+	headersPtr := flag.String("headers", "", "headers to include in the HTTP request")
+	metaPtr := flag.String("meta", "counts", "metadata option: 'workspace', or 'all'")
 	flag.Parse()
 
 	// Fallback to default URL if URL is empty
@@ -52,9 +48,6 @@ func main() {
 			*urlPtr = "http://localhost:8001"
 		}
 	}
-
-	// Set headers for the request
-	headers := getHeaders(*headersPtr)
 
 	// Send GET request to fetch workspaces
 	workspacesURL := *urlPtr + "/workspaces"
@@ -72,14 +65,14 @@ func main() {
 
 	for _, workspace := range workspaces {
 		metaURL := *urlPtr + "/workspaces/" + workspace.Name + "/meta"
-		meta, err := getMetadata(metaURL, headers)
+		meta, err := getMetadata(metaURL, *headersPtr)
 		if err != nil {
 			fmt.Printf("Error getting metadata for workspace %s: %v\n", workspace.Name, err)
 			continue
 		}
 
 		// Update counts for each meta field
-		updateCounts(meta, counts)
+		updateCounts(meta.Counts, counts)
 
 		// Store workspace metadata
 		workspaceMetadata := WorkspaceMetadata{
@@ -89,13 +82,17 @@ func main() {
 		workspaceMetadataList = append(workspaceMetadataList, workspaceMetadata)
 	}
 
-	// Print individual workspace metadata
-	fmt.Println("Individual Workspace Metadata:")
-	printWorkspaceMetadataTable(workspaceMetadataList)
+	// Print individual workspace metadata if specified
+	if *metaPtr == "workspace" || *metaPtr == "all" {
+		fmt.Println("Individual Workspace Metadata:")
+		printWorkspaceMetadataTable(workspaceMetadataList)
+	}
 
-	// Print total counts
-	fmt.Println("Total Entity Counts:")
-	printCountsTable(counts, len(workspaces))
+	// Print total counts if specified
+	if *metaPtr == "counts" || *metaPtr == "all" {
+		fmt.Println("Total Meta Field Counts:")
+		printCountsTable(counts)
+	}
 }
 
 func getWorkspaces(url string) ([]Workspace, error) {
@@ -119,15 +116,20 @@ func getWorkspaces(url string) ([]Workspace, error) {
 	return response.Data, nil
 }
 
-func getMetadata(url string, headers http.Header) (Metadata, error) {
+func getMetadata(url string, headers string) (Metadata, error) {
 	client := &http.Client{}
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return Metadata{}, err
 	}
 
-	// Set
-	req.Header = headers
+	// Add headers if provided
+	if headers != "" {
+		headerArr := strings.Split(headers, ":")
+		if len(headerArr) == 2 {
+			req.Header.Set(strings.TrimSpace(headerArr[0]), strings.TrimSpace(headerArr[1]))
+		}
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -140,89 +142,72 @@ func getMetadata(url string, headers http.Header) (Metadata, error) {
 		return Metadata{}, err
 	}
 
-	var meta Metadata
-	err = json.Unmarshal(body, &meta)
+	var metadata Metadata
+	err = json.Unmarshal(body, &metadata)
 	if err != nil {
 		return Metadata{}, err
 	}
 
-	return meta, nil
+	return metadata, nil
 }
 
-func updateCounts(obj interface{}, counts map[string]int) {
-	objValue := reflect.ValueOf(obj)
-	objType := objValue.Type()
-
-	for i := 0; i < objValue.NumField(); i++ {
-		field := objType.Field(i)
-		fieldValue := objValue.Field(i)
-
-		switch fieldValue.Kind() {
-		case reflect.Int:
-			if fieldValue.Interface().(int) != 0 {
-				counts[field.Name] += fieldValue.Interface().(int)
-			}
-		case reflect.Struct:
-			updateCounts(fieldValue.Interface(), counts)
+func updateCounts(metaCounts map[string]int, counts map[string]int) {
+	for key, value := range metaCounts {
+		if count, ok := counts[key]; ok {
+			counts[key] = count + value
+		} else {
+			counts[key] = value
 		}
 	}
 }
 
-func printWorkspaceMetadataTable(workspaceMetadataList []WorkspaceMetadata) {
+func printWorkspaceMetadataTable(metadataList []WorkspaceMetadata) {
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Workspace", "Plugins", "Targets", "Services", "Routes", "Upstreams"})
+	table.SetHeader([]string{"Workspace Name", "Plugins", "Targets", "Services", "Routes", "Upstreams"})
 
-	for _, workspaceMetadata := range workspaceMetadataList {
-		meta := workspaceMetadata.Meta
-		data := []string{
-			workspaceMetadata.WorkspaceName,
-			fmt.Sprint(meta.Counts.Plugins),
-			fmt.Sprint(meta.Counts.Targets),
-			fmt.Sprint(meta.Counts.Services),
-			fmt.Sprint(meta.Counts.Routes),
-			fmt.Sprint(meta.Counts.Upstreams),
-		}
-		table.Append(data)
+	for _, metadata := range metadataList {
+		plugins := strconv.Itoa(metadata.Meta.Counts["plugins"])
+		targets := strconv.Itoa(metadata.Meta.Counts["targets"])
+		services := strconv.Itoa(metadata.Meta.Counts["services"])
+		routes := strconv.Itoa(metadata.Meta.Counts["routes"])
+		upstreams := strconv.Itoa(metadata.Meta.Counts["upstreams"])
+
+		table.Append([]string{metadata.WorkspaceName, plugins, targets, services, routes, upstreams})
 	}
 
 	table.Render()
 }
 
-func printCountsTable(counts map[string]int, workspaceCount int) {
+func printCountsTable(counts map[string]int) {
+	// Create a slice of struct to hold the field and count information
+	type MetaField struct {
+		Field string
+		Count int
+	}
+
+	metaFields := make([]MetaField, 0, len(counts))
+
+	// Convert the map to a slice of MetaField structs
+	for field, count := range counts {
+		metaFields = append(metaFields, MetaField{Field: field, Count: count})
+	}
+
+	// Sort the metaFields slice based on the count in ascending order
+	sort.Slice(metaFields, func(i, j int) bool {
+		return metaFields[i].Count < metaFields[j].Count
+	})
+
+	// Print the sorted meta fields table
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Meta Field", "Count"})
 
-	for field, count := range counts {
+	for _, metaField := range metaFields {
 		row := []string{
-			field,
-			fmt.Sprint(count),
+			metaField.Field,
+			strconv.Itoa(metaField.Count),
 		}
 		table.Append(row)
 	}
 
-	// Add workspace count to the table
-	table.Append([]string{"Workspaces", fmt.Sprint(workspaceCount)})
-
 	table.Render()
-}
-
-func getHeaders(headersFlag string) http.Header {
-	headers := make(http.Header)
-
-	// Check if headersFlag is provided
-	if headersFlag != "" {
-		headerParts := strings.Split(headersFlag, ":")
-		if len(headerParts) == 2 {
-			headerKey := strings.TrimSpace(headerParts[0])
-			headerValue := strings.TrimSpace(headerParts[1])
-			headers.Set(headerKey, headerValue)
-		}
-	}
-
-	// Check if X_ADMIN_TOKEN environment variable is set
-	if token := os.Getenv("X_ADMIN_TOKEN"); token != "" {
-		headers.Set("x-admin-token", token)
-	}
-
-	return headers
 }
