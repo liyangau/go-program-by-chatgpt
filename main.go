@@ -91,7 +91,7 @@ func main() {
 	// Print total counts if specified
 	if *metaPtr == "counts" || *metaPtr == "all" {
 		fmt.Println("Total Meta Field Counts:")
-		printCountsTable(counts)
+		printCountsTable(counts, len(workspaceMetadataList))
 	}
 }
 
@@ -178,7 +178,7 @@ func printWorkspaceMetadataTable(metadataList []WorkspaceMetadata) {
 	table.Render()
 }
 
-func printCountsTable(counts map[string]int) {
+func printCountsTable(counts map[string]int, workspaceCount int) {
 	// Create a slice of struct to hold the field and count information
 	type MetaField struct {
 		Field string
@@ -201,6 +201,10 @@ func printCountsTable(counts map[string]int) {
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Meta Field", "Count"})
 
+	// Append the workspace count row to the table
+	table.Append([]string{"Workspaces", strconv.Itoa(workspaceCount)})
+
+	// Append the meta fields rows to the table
 	for _, metaField := range metaFields {
 		row := []string{
 			metaField.Field,
